@@ -51,6 +51,9 @@ int main(int argc, char **argv) {
 
     // 7. doit 함수가 끝나면(=통신 완료) 클라이언트와 연결을 닫는다.
     Close(connfd); // line:netp:tiny:close
+
+    printf("---------------------------------\n");
+    fflush(stdout);
   }
 }
 
@@ -286,8 +289,9 @@ void read_requesthdrs(rio_t *rp) {
   Rio_readlineb(rp, buf, MAXLINE);
 
   while (strcmp(buf, "\r\n")) {
-    Rio_readlineb(rp, buf, MAXLINE);
     printf("%s", buf);
+    fflush(stdout);   // 버퍼를 즉시 비우기
+    Rio_readlineb(rp, buf, MAXLINE);
   }
   return;
 }
