@@ -221,16 +221,24 @@ void serve_static(int fd, char *filename, int filesize) {
   // 3. 만들어진 응답 헤더를 클라이언트에게 보낸다.
   Rio_writen(fd, buf, strlen(buf));
 
+  // 파일을 담을 빈 메모리 공간 생성
+  srcp = Malloc(filesize);
+
   // 4. 보낼 파일을 연다.
   srcfd = Open(filename, O_RDONLY, 0);
-  // 5. 파일을 메모리에 매핑(mmap)한다. 파일을 메모리의 일부처럼 취급하여 효율적으로 접근할 수 있게 한다.
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+
+  // 5. 파일의 내용을 빈 메모리 공간에 복사
+  // (1) 어떤 파일에서 읽어서(=파일 번호표) (2) 어디에 담을지(=메모리 주소) (3) 얼마나 많이 읽을지(=파일 크기)
+  Rio_readn(srcfd, srcp, filesize);
+
   // 6. 파일 디스크립터는 이제 필요없기 때문에 닫는다.
   Close(srcfd);
+
   // 7. 메모리에 매핑된 파일 내용을 클라이언트에게 전부 보낸다.
   Rio_writen(fd, srcp, filesize);
-  // 8. 메모리 매핑을 해제한다.
-  Munmap(srcp, filesize);
+
+  // 8. 할당받았던 메모리 해제
+  free(srcp);
 }
 
 /**
