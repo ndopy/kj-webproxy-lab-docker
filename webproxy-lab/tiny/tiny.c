@@ -11,9 +11,9 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, char *method);
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 void sigchld_handler(int sig);
@@ -111,8 +111,8 @@ void doit(int fd) {
   // 3. 요청 라인에서 메서드 ,URI, HTTP 버전을 분리해 각 변수에 저장하기
   sscanf(buf, "%s %s %s", method, uri, version);
 
-  // 4. GET 메서드가 아니면 에러를 보낸다. (tiny는 GET 요청만 지원함)
-  if (strcasecmp(method, "GET")) {
+  // 4. GET, HEAD 메서드가 아니면 에러를 보낸다.
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {
     clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
     return;
   }
@@ -137,7 +137,7 @@ void doit(int fd) {
       return;
     }
     // 8-2. serve_static 함수를 호출해 파일을 클라이언트에게 보낸다.
-    serve_static(fd, filename, sbuf.st_size);
+    serve_static(fd, filename, sbuf.st_size, method);
   }
   // 9. 동적 컨텐츠 요청 처리
   else {
@@ -147,7 +147,7 @@ void doit(int fd) {
       return;
     }
     // 9-2. serve_dynamic 함수를 호출해 프로그램을 실행하고, 결과를 클라이언트에게 보낸다.
-    serve_dynamic(fd, filename, cgiargs);
+    serve_dynamic(fd, filename, cgiargs, method);
   }
 }
 
@@ -205,7 +205,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
  * @param filename 전송할 파일의 경로
  * @param filesize 파일의 크기
  */
-void serve_static(int fd, char *filename, int filesize) {
+void serve_static(int fd, char *filename, int filesize, char *method) {
   int srcfd;
   char *srcp, filetype[MAXLINE], buf[MAXLINE];
 
@@ -220,6 +220,11 @@ void serve_static(int fd, char *filename, int filesize) {
   sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
   // 3. 만들어진 응답 헤더를 클라이언트에게 보낸다.
   Rio_writen(fd, buf, strlen(buf));
+
+  // 문제 11.11 : HEAD 메서드일 때는 응답 헤더만 보내고 본문은 보내지 않는다.
+  if (!strcasecmp(method, "HEAD")) {
+    return;
+  }
 
   // 파일을 담을 빈 메모리 공간 생성
   srcp = Malloc(filesize);
@@ -251,7 +256,7 @@ void serve_static(int fd, char *filename, int filesize) {
  * @param filename 실행할 CGI 프로그램의 경로
  * @param cgiargs CGI 프로그램에 전달할 인자
  */
-void serve_dynamic(int fd, char *filename, char *cgiargs) {
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method) {
   char buf[MAXLINE], *emptylist[] = { NULL };
 
   // 1. 기본적인 성공 응답 헤더를 먼저 보낸다.
@@ -259,6 +264,11 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
   Rio_writen(fd, buf, strlen(buf));
   sprintf(buf, "Server: Tiny Web Server \r\n");
   Rio_writen(fd, buf, strlen(buf));
+
+  // 문제 11.11 : HEAD 메서드일 때는 응답 헤더만 보내고 본문은 보내지 않는다.
+  if (!strcasecmp(method, "HEAD")) {
+    return;
+  }
 
   // 2. Fork()로 현재 프로세스를 복제하여 자식 프로세스를 만든다.
   if (Fork() == 0) { // 자식 프로세스만 이 코드 블록을 실행한다.
