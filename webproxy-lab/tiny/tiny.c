@@ -16,6 +16,7 @@ void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
+void sigchld_handler(int sig);
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
@@ -28,6 +29,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
+
+  /* SIGCHLD 신호가 오면 sigchld_hanlder 함수를 실행한다. */
+  Signal(SIGCHLD, sigchld_handler);
 
   // 2. 입력 받은 포트 번호로 클라이언트의 연결을 기다리는 서버 소켓 열기
   listenfd = Open_listenfd(argv[1]);
@@ -56,6 +60,21 @@ int main(int argc, char **argv) {
     fflush(stdout);
   }
 }
+
+
+void sigchld_handler(int sig) {
+  int old_errno = errno; // 현재 errno 값을 백업
+  pid_t pid;
+
+  // 종료된 자식이 하나도 없을 때까지 반복하면서 정리한다.
+  while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
+    // waitpid 자체가 좀비를 정리하는 역할을 하기 때문에 몸체는 비어있어도 된다.
+  }
+
+  errno = old_errno;
+  return;
+}
+
 
 /**
  * @brief HTTP 웹 서버의 메인 실행 함수
@@ -240,11 +259,11 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
     setenv("QUERY_STRING", cgiargs, 1);
     // 4. `dup2` 를 사용해, 표준 출력(원래 화면으로 향함)의 방향을 클라이언트 소켓(fd)으로 바꾼다.
     Dup2(fd, STDOUT_FILENO);
-    // 5. `execve`로 지정된 CGI vㅡ로그램을 실행한다.
+    // 5. `execve`로 지정된 CGI 프로그램을 실행한다.
     //    이제 이 프로그램이 화면에 출력하는 모든 내용은 소켓을 통해 클라이언트에게 전달된다.
     Execve(filename, emptylist, environ);
   }
-  Wait(NULL);   /* Parent waits for and reaps child */
+  // Wait(NULL);   /* 숙제 문제 11.18 : 주석 처리 */
 }
 
 /**
