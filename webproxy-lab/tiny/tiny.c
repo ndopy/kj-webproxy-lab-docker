@@ -18,6 +18,16 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 void sigchld_handler(int sig);
 
+/**
+ * @brief HTTP 웹 서버의 메인 실행 함수
+ *
+ * 지정된 포트에서 클라이언트의 연결을 대기하고, 연결이 수립되면
+ * 해당 클라이언트의 HTTP 요청을 처리한다. 서버는 무한 루프로 실행된다.
+ *
+ * @param argc 명령행 인자의 개수
+ * @param argv 명령행 인자 배열 (argv[1]은 포트 번호)
+ * @return int 프로그램 종료 코드
+ */
 int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
@@ -62,6 +72,15 @@ int main(int argc, char **argv) {
 }
 
 
+/**
+ * @brief 자식 프로세스가 종료될 때 호출되는 시그널 핸들러
+ * 
+ * SIGCHLD 시그널을 받았을 때 실행되며, 종료된 자식 프로세스들을 정리한다.
+ * waitpid를 사용하여 좀비 프로세스가 되는 것을 방지한다.
+ * 논블로킹 방식으로 동작하여 서버의 주 실행 흐름을 방해하지 않는다.
+ * 
+ * @param sig 시그널 번호 (SIGCHLD)
+ */
 void sigchld_handler(int sig) {
   int old_errno = errno; // 현재 errno 값을 백업
   pid_t pid;
@@ -76,16 +95,6 @@ void sigchld_handler(int sig) {
 }
 
 
-/**
- * @brief HTTP 웹 서버의 메인 실행 함수
- *
- * 지정된 포트에서 클라이언트의 연결을 대기하고, 연결이 수립되면
- * 해당 클라이언트의 HTTP 요청을 처리한다. 서버는 무한 루프로 실행된다.
- *
- * @param argc 명령행 인자의 개수
- * @param argv 명령행 인자 배열 (argv[1]은 포트 번호)
- * @return int 프로그램 종료 코드
- */
 /**
  * @brief 클라이언트의 HTTP 요청을 처리하는 함수
  * 
@@ -151,6 +160,7 @@ void doit(int fd) {
   }
 }
 
+
 /**
  * @brief URI를 파싱하여 파일 이름과 CGI 인자를 추출하는 함수
  *
@@ -194,6 +204,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
     return 0;  // dynamic 이라는 의미로 반환
   }
 }
+
 
 /**
  * @brief 정적 컨텐츠를 클라이언트에게 전송하는 함수
@@ -246,6 +257,7 @@ void serve_static(int fd, char *filename, int filesize, char *method) {
   free(srcp);
 }
 
+
 /**
  * @brief 동적 컨텐츠를 생성하여 클라이언트에게 전송하는 함수
  *
@@ -284,11 +296,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs, char *method) {
   // Wait(NULL);   /* 숙제 문제 11.18 : 주석 처리 */
 }
 
-/**
- *
- * @param filename
- * @param filetype
- */
+
 /**
  * @brief 파일의 MIME 타입을 결정하는 함수
  *
@@ -314,6 +322,7 @@ void get_filetype(char *filename, char *filetype) {
   }
 }
 
+
 /**
  * @brief HTTP 요청 헤더를 읽는 함수
  *
@@ -334,6 +343,7 @@ void read_requesthdrs(rio_t *rp) {
   }
   return;
 }
+
 
 /**
  * @brief 클라이언트에게 에러 메시지를 전송하는 함수
