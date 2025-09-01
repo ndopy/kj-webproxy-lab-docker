@@ -9,137 +9,172 @@
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 
 void doit(int fd);
+void read_requesthdrs(rio_t *rp, char *host_header, char *other_header);
+void parse_uri(char *uri, char *hostname, char *port, char *path);
+void reassemble(char *req, char *path, char *hostname, char *other_header);
+void forward_response(int serve_df, int  fd);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
-int parse_uri(char *uri, char *hostname, char *port, char *path);
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     int listenfd, connfd;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
 
-    /* Check command-line args */
+    /* 프로그램 실행 시 포트 번호를 입력했는지 확인한다. */
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
         exit(1);
     }
 
+    // 입력한 포트 번호로 클라이언트 연결을 기다리는 서버 소켓 열기
     listenfd = Open_listenfd(argv[1]);
 
     while (1) {
         clientlen = sizeof(clientaddr);
+        // 연결이 오면 클라이언트와 통신할 새로운 소켓을 만든다.
         connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+
+        // 접속한 클라이언트의 IP 주소와 포트 번호 얻기
         Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        printf("Accepted connection from (%s, %s)", hostname, port);
+
         doit(connfd);
         Close(connfd);
-        printf("---------------------------------\n");
-        fflush(stdout);
     }
 }
 
-/*
- * doit - handle one HTTP request/response transaction
- */
-void doit(int fd)
-{
-    char buf[MAXLINE];        // 클라이언트 요청 메시지를 통째로 담을 버퍼
-    char method[MAXLINE];     // 클라이언트 요청의 메서드 ("무엇을")
-    char uri[MAXLINE];        // 클라이언트 요청의 URI  ("어디에서")
-    char version[MAXLINE];    // 클라이언트 요청의 HTTP 버전  ("어떤 규칙으로")
-
-    // 클라이언트가 요청한 URI 를 더 잘게 쪼갠다.
-    // ex. http://www.google.com:80/index.html
-    char hostname[MAXLINE];   // 어떤 서버로 가야하는지? (www.google.com)
-    char port[MAXLINE];       // 어떤 포트로 가야하는지? (80)
-    char path[MAXLINE];       // 가서 무엇을 달라고 할지? (/index.html)
-
-    // 네트워크 데이터를 안전하고 편리하게 읽기 위한 도구
+void doit(int fd) {
+    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    // 헤더를 확인하고 저장할 버퍼
+    char host_header[MAXLINE], other_header[MAXLINE];
+    // 목적지 서버에 연결하기 위한 정보를 담을 버퍼
+    char hostname[MAXLINE], port[MAXLINE], path[MAXLINE];
+    // 목적지 서버로 보낼 요청을 담을 버퍼
+    char request_buf[MAXLINE];
     rio_t rio;
 
-    /* ! 클라이언트의 요청 라인 읽기 */
-    // rio 초기화 및 fd 연결하기
+    // 1. 소켓에서 데이터를 읽을 준비하기
     Rio_readinitb(&rio, fd);
 
-    // fd 로 들어온 데이터의 첫 번째 줄바꿈(\n)이 나올 때까지 읽어서 buf 에 담는다.
+    // 2. 클라이언트가 보낸 요청의 첫 줄(요청 라인) 읽기
     Rio_readlineb(&rio, buf, MAXLINE);
+    printf("Request headers:\n");
+    printf("%s", buf);
 
-    // method, uri, version 정보를 저장한다.
+    // 3. 요청 라인에서 메서드 ,URI, HTTP 버전을 분리해 각 변수에 저장하기
     sscanf(buf, "%s %s %s", method, uri, version);
 
-    // HTTP 메서드 검증 : GET 요청
-    if (strcasecmp(method, "GET") == 0) {
-        // URI 파싱
-        parse_uri(uri, hostname, port, path);
-
-        printf(">> Parsed URI: \n");
-        printf("   Hostname: %s\n", hostname);
-        printf("   Port: %s\n", port);
-        printf("   Path: %s\n", path);
-        fflush(stdout);
-    }
-    // CONNECT 요청 처리 (HTTPS)
-    else if (strcasecmp(method, "CONNECT") == 0) {
-        printf(">> Handling CONNECT request for: %s\n", uri);
-        fflush(stdout);
-
-        // TODO: HTTPS 터널링 구현
-    } else {
-        clienterror(fd, method, "501", "Not Implemented", "Tiny does not implement this method");
+    // 4. GET, 메서드가 아니면 에러를 보낸다.
+    if (strcasecmp(method, "GET") != 0) {
+        clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
         return;
     }
+
+    // 5. 요청 헤더를 읽어서 버린다.
+    read_requesthdrs(&rio, host_header, other_header);
+
+    parse_uri(uri, hostname, port, path);
+
+    int serve_df = Open_clientfd(hostname, port);
+
+    reassemble(request_buf, path, hostname, other_header);
+
+    Rio_writen(serve_df, request_buf, strlen(request_buf));
+
+    forward_response(serve_df, fd);
 }
 
-int parse_uri(char *uri, char *hostname, char *port, char *path) {
-    // uri : http://www.google.com:80/index.html
+void read_requesthdrs(rio_t *rp, char *host_header, char *other_header) {
+    char buf[MAXLINE];
 
-    // 1. http:// 뒤의 호스트네임 시작 위치 찾기
-    char *host_ptr = strstr(uri, "//");
-    host_ptr = (host_ptr != NULL) ? host_ptr + 2 : uri;
+    host_header[0] = '\0';
+    other_header[0] = '\0';
 
-    // 2. 경로 시작 위치 찾기 ('/' 문자)
-    char *path_ptr = strchr(host_ptr, '/');
-    if (path_ptr == NULL) { // ex.http://www.google.com
+    while (Rio_readlineb(rp, buf, MAXLINE) > 0 && strcmp(buf, "\r\n")) {
+        if (!strncasecmp(buf, "Host:", 5)) {
+            strcpy(host_header, buf);
+        } else if (!strncasecmp(buf, "User-Agent:", 11) ||
+                   !strncasecmp(buf, "Connection:", 11) ||
+                   !strncasecmp(buf, "Proxy-Connection:", 17)) {
+            continue; // 무시
+        } else {
+            strcat(other_header, buf);
+        }
+    }
+}
+
+void parse_uri(char *uri, char *hostname, char *port, char *path) {
+    char *host_begin, *host_end, *port_begin, *path_begin;
+    char buf[MAXLINE];
+
+    strcpy(buf, uri);
+
+    host_begin = strstr(buf, "//");
+    host_begin = (host_begin != NULL) ? host_begin + 2 : buf;
+
+    path_begin = strchr(host_begin, '/');
+    if (path_begin != NULL) {
+        strcpy(path, path_begin);
+        *path_begin = '\0';
+    } else {
         strcpy(path, "/");
-    } else {
-        strcpy(path, path_ptr);
-        *path_ptr = '\0'; // 호스트/포트 부분만 남기기 위해 임시로 문자열을 자름
     }
 
-    // 3. 포트 번호 찾기
-    char *port_ptr = strchr(host_ptr, ':');
-    if (port_ptr != NULL) { // ex. http://www.google.com:80
-        *port_ptr = '\0'; // 호스트네임 부분만 남기기 위해 임시로 문자열을 자름
-        strcpy(hostname, host_ptr);
-        strcpy(port, port_ptr + 1);
+    port_begin = strchr(host_begin, ':');
+    if (port_begin != NULL) {
+        *port_begin = '\0';
+        strcpy(hostname, host_begin);
+        strcpy(port, port_begin + 1);
     } else {
+        strcpy(hostname, host_begin);
         strcpy(port, "80");
-        strcpy(hostname, host_ptr);
     }
 }
 
-/*
- * clienterror - returns an error message to the client
- */
-void clienterror(int fd, char *cause, char *errnum,
-                 char *shortmsg, char *longmsg)
-{
-    char buf[MAXLINE], body[MAXBUF];
+void reassemble(char *req, char *path, char *hostname, char *other_header) {
+    sprintf(req,
+        "GET %s HTTP/1.0\r\n"
+        "Host: %s\r\n"
+        "%s"
+        "Connection: close\r\n"
+        "Proxy-Connection: close\r\n"
+        "%s"
+        "\r\n",
+        path,
+        hostname,
+        user_agent_hdr,
+        other_header
+    );
+}
 
-    /* Build the HTTP response body */
-    sprintf(body, "<html><title>Proxy Error</title>");
+void forward_response(int serve_df, int  fd) {
+    rio_t serve_rio;
+    char response_buf[MAXBUF];
+
+    Rio_readinitb(&serve_rio, serve_df);
+    ssize_t n;
+
+    while ((n = Rio_readnb(&serve_rio, response_buf, MAXBUF)) > 0) {
+        rio_writen(fd, response_buf, n);
+    }
+}
+
+
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg){
+    char buf[MAXLINE], body[MAXLINE]; // buf: HTTP 헤더 문자열 저장용, body: 응답 본문 HTML 저장용
+    sprintf(body, "<html><title>Tiny Error</title></html>");
     sprintf(body, "%s<body bgcolor=""ffffff"">\r\n", body);
     sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
     sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
-    sprintf(body, "%s<hr><em>The Tiny Proxy server</em>\r\n", body);
+    sprintf(body, "%s<hr><em>The Tiny Web server</em>\r\n</body>", body);
 
     /* Print the HTTP response */
     sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen(fd, buf, strlen(buf)); // 상태줄 전송 예: HTTP/1.0 404 Not Found
     sprintf(buf, "Content-type: text/html\r\n");
-    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen(fd, buf, strlen(buf)); // MIME 타입 명시: HTML이라는 것을 알려줌
     sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
-    Rio_writen(fd, buf, strlen(buf));
-    Rio_writen(fd, body, strlen(body));
+    Rio_writen(fd, buf, strlen(buf)); // 본문 길이 알려줌 + 빈 줄로 헤더 종료
+    Rio_writen(fd, body, strlen(body)); // 위에서 만든 HTML을 클라이언트에게 전송
 }
