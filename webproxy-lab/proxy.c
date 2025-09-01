@@ -69,7 +69,7 @@ void doit(int fd)
     sscanf(buf, "%s %s %s", method, uri, version);
 
     // HTTP 메서드 검증 : GET 요청
-    if (strcasecmp(method, "GET")) {
+    if (strcasecmp(method, "GET") == 0) {
         // URI 파싱
         parse_uri(uri, hostname, port, path);
 
