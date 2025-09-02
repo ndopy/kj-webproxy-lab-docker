@@ -89,19 +89,20 @@ void doit(int fd) {
 
     // 7. 목적지 서버와 연결할 새로운 소켓을 생성한다.
     int serve_df = Open_clientfd(hostname, port);
+
     // Open_clientfd는 실패 시 -1을 반환하므로, 에러 처리가 필요하다.
     if (serve_df < 0) {
         clienterror(fd, hostname, "502", "Bad Gateway", "Proxy could not connect to the host");
         return;
     }
 
-    // 8. 서버로 보낼 HTTP 요청 메시지를 새로 조립한다.
+    // 8. 목적지 서버로 보낼 HTTP 요청 메시지를 새로 조립한다.
     reassemble(request_buf, path, hostname, other_header);
 
-    // 9. 조립한 HTTP 요청을 서버로 전송한다.
+    // 9. 조립한 HTTP 요청(request_bf)을 목적지 서버와 연결된 소켓(serve_df)을 통해 전송한다.
     Rio_writen(serve_df, request_buf, strlen(request_buf));
 
-    // 10. 서버로부터 받은 응답을 클라이언트에게 전달한다.
+    // 10. 목적지 서버로부터 받은 응답을 클라이언트에게 전달한다.
     forward_response(serve_df, fd);
 }
 
@@ -138,7 +139,7 @@ void read_requesthdrs(rio_t *rp, char *other_header) {
  * @param path 추출된 경로를 저장할 버퍼
  */
 void parse_uri(char *uri, char *hostname, char *port, char *path) {
-    // URI는 "http://hostname:port/path" 형식을 가질 수 있다.
+    // URI는 "http://www.example.com:8080/path/to/resource.html" 형식을 가질 수 있다.
     char *host_begin;
     char *port_begin;
     char *path_begin;
@@ -152,26 +153,29 @@ void parse_uri(char *uri, char *hostname, char *port, char *path) {
     // "http://"가 있다면 그 다음부터 호스트 이름이 시작된다.
     host_begin = strstr(buf, "//");
     host_begin = (host_begin != NULL) ? host_begin + 2 : buf;
+    // host_begin = "www.example.com:8080/path/to/resource.html"
 
     // 호스트 이름 뒤에 오는 첫 '/'가 경로의 시작이다.
     path_begin = strchr(host_begin, '/');
     if (path_begin != NULL) {
+        // path_begin = "/path/to/resource.html"
         strncpy(path, path_begin, MAXLINE - 1);
         path[MAXLINE - 1] = '\0';
-        *path_begin = '\0'; // 호스트 이름과 포트 부분만 남기기 위해 문자열을 자른다.
+        *path_begin = '\0'; // 호스트 이름과 포트 부분만 남기기 위해 문자열을 자르는 처리 추가
     } else {
         strncpy(path, "/", MAXLINE);
     }
 
     // 남은 부분에서 ':'를 찾아 포트 번호를 분리한다.
+    // www.example.com:8080
     port_begin = strchr(host_begin, ':');
-    if (port_begin != NULL) {
-        *port_begin = '\0'; // 호스트 이름만 남기기 위해 문자열을 자른다.
+    if (port_begin != NULL) {  // 포트 번호가 명시되어 있을 경우
+        *port_begin = '\0';    // 호스트 이름만 남기기 위해 문자열을 자르는 처리 추가
         strncpy(hostname, host_begin, MAXLINE - 1);
         hostname[MAXLINE - 1] = '\0';
         strncpy(port, port_begin + 1, MAXLINE - 1);
         port[MAXLINE - 1] = '\0';
-    } else {
+    } else {  // 포트 번호가 명시되어 있지 않은 경우 -> 80번 포트로 처리
         strncpy(hostname, host_begin, MAXLINE - 1);
         hostname[MAXLINE - 1] = '\0';
         strncpy(port, "80", MAXLINE);
@@ -203,10 +207,10 @@ void reassemble(char *req, char *path, char *hostname, char *other_header) {
 }
 
 /**
- * 서버로부터 받은 응답을 클라이언트에게 전달하는 함수
+ * 목적지 서버로부터 받은 응답을 클라이언트에게 전달하는 함수
  * 
- * @param serve_df 서버와 연결된 파일 디스크립터
- * @param fd 클라이언트와 연결된 파일 디스크립터
+ * @param serve_df  목적지 서버와 연결된 파일 디스크립터
+ * @param fd        클라이언트와 연결된 파일 디스크립터
  */
 void forward_response(int serve_df, int  fd) {
     rio_t serve_rio;
@@ -215,7 +219,12 @@ void forward_response(int serve_df, int  fd) {
     Rio_readinitb(&serve_rio, serve_df);
     ssize_t n;
 
+
+    // 목적지 서버가 아직 응답을 보내지 않아 소켓에 읽을 데이터가 없다면
+    // 이 프로그램은 Rio_readnb 라인에서 실행을 멈추고 대기(block)한다.
+    // 목적지 서버가 응답 데이터를 보내기 시작하면 serve_df 소켓으로 데이터가 수신된다.
     while ((n = Rio_readnb(&serve_rio, response_buf, MAXBUF)) > 0) {
+        // 원래의 클라이언트(fd)에게 수신 데이터를 전달
         rio_writen(fd, response_buf, n);
     }
 }
