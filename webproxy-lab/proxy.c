@@ -8,28 +8,35 @@
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 
+/* --------------- Cache Data Structures --------------- */
+// 캐시 블록 하나를 나타내는 구조체
+typedef struct CacheBlock {
+    char uri[MAXLINE];                      // key: 요청 URI
+    char object_data[MAX_OBJECT_SIZE];      // value: 웹 객체 데이터
+    int object_size;                        // 객체의 크기
+
+    struct CacheBlock *prev;                // 이전 블록을 가리키는 포인터
+    struct CacheBlock *next;                // 다음 블록을 가리키는 포인터
+} CacheBlock;
+
+// 캐시 전체를 관리하기 위한 전역 변수
+CacheBlock *cache_root;     // 캐시 연결 리스트의 시작점 (가장 최근에 사용한 블록)
+CacheBlock *cache_tail;     // 캐시 연결 리스트의 마지막 블록
+int total_cache_size;       // 현재 캐시에 저장된 모든 객체 크기의 합
+/* ----------------------------------------------------- */
+
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *other_header);
 void parse_uri(char *uri, char *hostname, char *port, char *path);
 void reassemble(char *req, char *path, char *hostname, char *other_header);
 void forward_response(int serve_df, int  fd);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void *handle_client_request(void *vargp);
+void init_cache();
+CacheBlock* find_cache_block(char *uri);
+void add_to_cache(char *uri, char *data, int size);
+void evict_lru_block();
 
-void *handle_client_request(void *vargp) {
-    // 1. 인자에서 connfd 값을 안전하게 추출
-    int connfd = *((int *) vargp);
-
-    // 2. 값 추출 후 즉시 메모리 해제 (더 이상 사용하지 않으므로)
-    free(vargp);
-
-    // 3. 실제 요청 처리
-    doit(connfd);
-
-    // 4. 연결 종료
-    Close(connfd);
-
-    return NULL;
-}
 
 /**
  * 프록시 서버의 메인 함수
@@ -87,17 +94,6 @@ void doit(int fd) {
     char hostname[MAXLINE], port[MAXLINE], path[MAXLINE];   // 목적지 서버에 연결하기 위한 정보를 담을 버퍼
     char request_buf[MAXLINE];                              // 목적지 서버로 보낼 요청을 담을 버퍼
     rio_t rio;
-
-    // 1. 소켓에서 데이터를 읽을 준비하기
-    Rio_readinitb(&rio, fd);
-
-    // 2. 클라이언트가 보낸 요청의 첫 줄(요청 라인) 읽기
-    Rio_readlineb(&rio, buf, MAXLINE);
-    printf("Request headers:\n");
-    printf("%s", buf);
-
-    // 3. 요청 라인에서 메서드 ,URI, HTTP 버전을 분리해 각 변수에 저장하기
-    sscanf(buf, "%s %s %s", method, uri, version);
 
     // 4. GET, 메서드가 아니면 에러를 보낸다.
     if (strcasecmp(method, "GET") != 0) {
@@ -236,7 +232,7 @@ void reassemble(char *req, char *path, char *hostname, char *other_header) {
  * @param serve_df  목적지 서버와 연결된 파일 디스크립터
  * @param fd        클라이언트와 연결된 파일 디스크립터
  */
-void forward_response(int serve_df, int  fd) {
+void forward_response(int serve_df, int fd) {
     rio_t serve_rio;
     char response_buf[MAXBUF];
 
@@ -283,4 +279,192 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
     snprintf(buf, MAXLINE, "Content-length: %d\r\n\r\n", (int)strlen(body));
     Rio_writen(fd, buf, strlen(buf)); // 본문 길이 알려줌 + 빈 줄로 헤더 종료
     Rio_writen(fd, body, strlen(body)); // 위에서 만든 HTML을 클라이언트에게 전송
+}
+
+
+/**
+ * 클라이언트의 요청을 처리하는 스레드 함수
+ * 
+ * @param vargp 클라이언트와 연결된 소켓 파일 디스크립터의 포인터
+ * @return NULL (스레드 종료)
+ */
+void *handle_client_request(void *vargp) {
+    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char other_header[MAXLINE];                             // 헤더를 확인하고 저장할 버퍼
+    char hostname[MAXLINE], port[MAXLINE], path[MAXLINE];   // 목적지 서버에 연결하기 위한 정보를 담을 버퍼
+    char request_buf[MAXLINE];                              // 목적지 서버로 보낼 요청을 담을 버퍼
+    char response_buf[MAXLINE];
+    rio_t rio_client;
+    rio_t rio_server;
+
+    // 인자에서 connfd 값을 안전하게 추출
+    int connfd = *((int *) vargp);
+
+    // 값 추출 후 즉시 메모리 해제 (더 이상 사용하지 않으므로)
+    free(vargp);
+
+    // 1. 소켓에서 데이터를 읽을 준비하기
+    Rio_readinitb(&rio_client, connfd);
+
+    // 2. 클라이언트가 보낸 요청의 첫 줄(요청 라인) 읽기
+    Rio_readlineb(&rio_client, buf, MAXLINE);
+    printf("Request headers:\n");
+    printf("%s", buf);
+
+    // 3. 요청 라인에서 메서드 ,URI, HTTP 버전을 분리해 각 변수에 저장하기
+    sscanf(buf, "%s %s %s", method, uri, version);
+
+    CacheBlock *cache_block = find_cache_block(uri);
+
+    if (cache_block != NULL) { // 캐시 히트
+        Rio_writen(connfd, cache_block->object_data, cache_block->object_size);
+    } else {                  // 캐시 미스
+        // 실제 요청 처리
+        // GET, 메서드가 아니면 에러를 보낸다.
+        if (strcasecmp(method, "GET") != 0) {
+            clienterror(connfd, method, "501", "Not implemented", "Tiny does not implement this method");
+            return NULL;
+        }
+
+        // 나머지 요청 헤더를 읽는다.
+        read_requesthdrs(&rio_client, other_header);
+
+        // URI를 파싱하여 호스트명, 포트, 경로를 추출한다.
+        parse_uri(uri, hostname, port, path);
+
+        // 목적지 서버와 연결할 새로운 소켓을 생성한다.
+        int server_fd = Open_clientfd(hostname, port);
+
+        // Open_clientfd는 실패 시 -1을 반환하므로, 에러 처리가 필요하다.
+        if (server_fd < 0) {
+            clienterror(connfd, hostname, "502", "Bad Gateway", "Proxy could not connect to the host");
+            return NULL;
+        }
+
+        // 목적지 서버로 보낼 HTTP 요청 메시지를 새로 조립한다.
+        reassemble(request_buf, path, hostname, other_header);
+
+        // 조립한 HTTP 요청(request_bf)을 목적지 서버와 연결된 소켓(serve_df)을 통해 전송한다.
+        Rio_writen(server_fd, request_buf, strlen(request_buf));
+
+        char full_response_buf[MAX_OBJECT_SIZE];
+        int total_size = 0;
+        ssize_t n;
+        rio_readinitb(&rio_server, server_fd);
+
+        // 목적지 서버로부터 받은 응답을 저장하기
+        while ((n = Rio_readnb(&rio_server, response_buf, MAXBUF)) > 0) {
+            memcpy(full_response_buf + total_size, response_buf, n);
+            total_size += n;
+        }
+
+        // 캐시에 추가
+        add_to_cache(uri, full_response_buf, total_size);
+
+        // full_response_buf 를 클라이언트에게 전송
+        Rio_writen(connfd, full_response_buf, total_size);
+
+        // 연결 종료
+        Close(server_fd);
+    }
+
+    // 연결 종료
+    Close(connfd);
+
+    return NULL;
+}
+
+
+/**
+ * 캐시를 초기화하는 함수
+ * 
+ * 캐시의 루트와 테일 포인터를 NULL로 설정하고
+ * 총 캐시 크기를 0으로 초기화한다.
+ */
+void init_cache() {
+    cache_root = NULL;
+    cache_tail = NULL;
+    total_cache_size = 0;
+}
+
+/**
+ * 주어진 URI에 해당하는 캐시 블록을 찾는 함수
+ * 
+ * @param uri 검색할 URI 문자열
+ * @return 찾은 캐시 블록의 포인터, 없으면 NULL
+ */
+CacheBlock* find_cache_block(char *uri) {
+    CacheBlock *current = cache_root;
+
+    while (current != NULL) {
+        // current-> uri 와 uri 가 같으면 캐시 히트
+        if (strcmp(current->uri, uri) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+
+    return NULL;
+}
+
+/**
+ * 새로운 웹 객체를 캐시에 추가하는 함수
+ * 
+ * @param uri 캐시할 객체의 URI
+ * @param data 캐시할 객체의 데이터
+ * @param size 캐시할 객체의 크기
+ */
+void add_to_cache(char *uri, char *data, int size) {
+    // 1. 공간이 부족하면 충분해질 때까지 가장 오래된 블록을 제거한다.
+    while ((total_cache_size + size) > MAX_CACHE_SIZE) {
+        // evict_lru_block();
+    }
+
+    // 2. 새로운 캐시 블록을 위한 메모리 할당
+    CacheBlock *new_block = (CacheBlock *) malloc(sizeof(CacheBlock));
+
+    // 3. 새 블록에 데이터 복사 및 초기화
+    strcpy(new_block->uri, uri);
+    memcpy(new_block->object_data, data, size);  // 바이너리 데이터이므로 memcpy 사용
+    new_block->object_size = size;
+    new_block->prev = NULL;
+
+    // 4. 연결 리스트에 새 블록 삽입
+    if (cache_root == NULL) {    // 리스트가 비어 있을 경우
+        cache_tail = new_block;
+        new_block->next = NULL;
+    } else {                     // 기존 리스트가 있을 경우
+        cache_root->prev = new_block;
+        new_block->next = cache_root;
+    }
+
+    cache_root = new_block;     // cache_root 업데이트
+    total_cache_size += size;   // 캐시 사이즈 업데이트
+}
+
+/**
+ * 가장 오래전에 사용된(Least Recently Used) 캐시 블록을 제거하는 함수
+ */
+void evict_lru_block() {
+    // 캐시가 비어 있으면 아무것도 하지 않고 함수 종료
+    if (cache_tail == NULL) {
+        return;
+    }
+
+    // 캐시 용량 업데이트
+    total_cache_size -= cache_tail->object_size;
+
+    CacheBlock *old_tail = cache_tail;
+
+    // 리스트에 블록이 한 개만 있는 경우
+    if (cache_root == cache_tail) {
+        cache_root = NULL;
+        cache_tail = NULL;
+    } else {
+        cache_tail = cache_tail->prev;
+        cache_tail->next = NULL;
+    }
+
+    // 메모리 해제
+    free(old_tail);
 }
