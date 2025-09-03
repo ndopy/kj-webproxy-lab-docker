@@ -15,6 +15,21 @@ void reassemble(char *req, char *path, char *hostname, char *other_header);
 void forward_response(int serve_df, int  fd);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 
+void *handle_client_request(void *vargp) {
+    // 1. 인자에서 connfd 값을 안전하게 추출
+    int connfd = *((int *) vargp);
+
+    // 2. 값 추출 후 즉시 메모리 해제 (더 이상 사용하지 않으므로)
+    free(vargp);
+
+    // 3. 실제 요청 처리
+    doit(connfd);
+
+    // 4. 연결 종료
+    Close(connfd);
+
+    return NULL;
+}
 
 /**
  * 프록시 서버의 메인 함수
@@ -47,8 +62,17 @@ int main(int argc, char **argv) {
         Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)", hostname, port);
 
-        doit(connfd);
-        Close(connfd);
+        // doit 을 실행할 새로운 스레드 생성
+        pthread_t tid;
+
+        int *connfd_ptr = malloc(sizeof(int));
+        *connfd_ptr = connfd;
+
+        // Pthread_create(스레드_식별자, 스레드_속성, 스레드가_수행할_함수, 스레드가_수행할_함수에_전달할_인자)
+        Pthread_create(&tid, NULL, handle_client_request, connfd_ptr);
+
+        // 생성된 스레드를 즉시 분리하여 자원을 자동으로 해제하도록 함.
+        // Pthread_detach(tid);
     }
 }
 
